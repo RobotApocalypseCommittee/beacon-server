@@ -1,24 +1,16 @@
-use actix_web::{web, Responder, HttpResponse, error};
-use ring::rand::{SecureRandom};
-use diesel::prelude::*;
-use super::schema::{sessions, devices};
-use crate::{ApplicationData, base64enc, database};
-use chrono::{Utc, Duration, DateTime, NaiveDateTime};
-use serde::{Serialize, Deserialize};
-use uuid::Uuid;
-use crate::session::HandlerError::{SessionInvalid, AsyncError};
-use ring::signature;
+use actix_web::{error, HttpResponse, Responder, web};
 use actix_web::error::BlockingError;
+use chrono::{Duration, NaiveDateTime, Utc};
+use diesel::prelude::*;
+use ring::rand::SecureRandom;
+use ring::signature;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
-#[derive(Debug)]
-pub enum HandlerError {
-    DatabaseError(diesel::result::Error),
-    PoolError(r2d2::Error),
-    AsyncError,
-    SessionInvalid,
-    DeviceUnknown,
-    AuthenticationError
-}
+use crate::{ApplicationData, base64enc};
+use crate::utils::{HandlerError, InternalError};
+
+use super::schema::{devices, sessions};
 
 #[derive(Deserialize)]
 pub struct SessionRequest {
@@ -29,6 +21,12 @@ pub struct SessionRequest {
 
     #[serde(with = "base64enc")]
     signed_nonce: Vec<u8>
+}
+
+#[derive(Serialize)]
+pub struct SessionResponse {
+    #[serde(with = "base64enc")]
+    nonce: Vec<u8>
 }
 
 #[derive(Serialize)]
@@ -66,10 +64,11 @@ pub async fn new_session_request(app_data: web::Data<ApplicationData>) -> impl R
     }
 }
 
-pub async fn check_session(req: SessionRequest, pool: database::Pool) -> Result<Uuid, HandlerError>{
+pub async fn check_session(req: SessionRequest, data: &ApplicationData) -> Result<(Uuid, SessionResponse), HandlerError> {
+    let data = data.clone();
     web::block(move || {
-        let conn = pool.get()
-            .map_err(|e| HandlerError::PoolError(e))?;
+        let conn = data.pool.get()
+            .map_err(|e| HandlerError::InternalError(InternalError::PoolError(e)))?;
 
         // Look for active session
         let (session_id, session_expires) = sessions::table.filter(sessions::nonce.eq(&req.nonce))
@@ -77,7 +76,7 @@ pub async fn check_session(req: SessionRequest, pool: database::Pool) -> Result<
             .first::<(i32, NaiveDateTime)>(&conn)
             .map_err(|e| match e {
                 diesel::result::Error::NotFound => HandlerError::SessionInvalid,
-                _ => HandlerError::DatabaseError(e)
+                _ => HandlerError::InternalError(InternalError::DatabaseError(e))
             })?;
 
         // Still valid
@@ -86,18 +85,34 @@ pub async fn check_session(req: SessionRequest, pool: database::Pool) -> Result<
             let pub_key = devices::table.find(req.device_id).select(devices::public_key).first::<Vec<u8>>(&conn)
                 .map_err(|e| match e {
                     diesel::result::Error::NotFound => HandlerError::DeviceUnknown,
-                    _ => HandlerError::DatabaseError(e)
+                    _ => HandlerError::InternalError(InternalError::DatabaseError(e))
                 })?;
             let device_public_key = signature::UnparsedPublicKey::new(&signature::ED25519, pub_key);
             device_public_key.verify(&req.nonce[..], &req.signed_nonce[..])
-                .map_err(|e| HandlerError::AuthenticationError)?;
-            // TODO: Generate new nonce...
-            Ok(req.device_id)
+                .map_err(|_e| HandlerError::AuthenticationError)?;
+
+            // Now generate new nonce
+            let mut new_nonce =  vec![0u8; 16];
+            data.rng.fill(&mut new_nonce)
+                .map_err(|_e| HandlerError::InternalError(InternalError::RNGError))?;
+
+            // And expiry
+            let expiry = (Utc::now() + Duration::days(1)).naive_utc();
+            diesel::update(sessions::table.find(session_id))
+                .set((
+                    sessions::nonce.eq(&new_nonce),
+                    sessions::expires.eq(expiry)
+                )).execute(&conn).map_err(|e| HandlerError::InternalError(InternalError::DatabaseError(e)))?;
+            // Return new nonce, and device id
+
+            Ok((req.device_id, SessionResponse{ nonce: new_nonce}))
         } else {
+            diesel::delete(sessions::table.find(session_id))
+                .execute(&conn).map_err(|e| HandlerError::InternalError(InternalError::DatabaseError(e)))?;
             Err(HandlerError::SessionInvalid)
         }
     }).await.map_err(|e| match e {
         BlockingError::Error(he) => he,
-        BlockingError::Canceled => HandlerError::AsyncError
+        BlockingError::Canceled => HandlerError::InternalError(InternalError::AsyncError)
     })
 }
