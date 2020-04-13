@@ -1,4 +1,4 @@
-use actix_web::{error, HttpResponse, Responder, web};
+use actix_web::{Responder, web, HttpResponse};
 use actix_web::error::BlockingError;
 use chrono::{Duration, NaiveDateTime, Utc};
 use diesel::prelude::*;
@@ -36,31 +36,35 @@ struct NewSessionResponse {
     expiry: NaiveDateTime
 }
 
-pub async fn new_session_request(app_data: web::Data<ApplicationData>) -> impl Responder {
-    let expiry = (Utc::now() + Duration::days(1)).naive_utc();
-    let mut r_nonce =  vec![0u8; 16];
-    app_data.rng.fill(&mut r_nonce).expect("Random Broken AAAAA");
-    let n_nonce = r_nonce.clone();
-    let res = web::block( move || {
-        let conn = app_data.pool.get()
-            .map_err(|e| e.to_string())?;
-        println!("Got pool");
+// In seconds
+const SESSION_DURATION: i64 = 60*60;
 
+pub async fn new_session_request(data: web::Data<ApplicationData>) -> impl Responder {
+    let res: Result<NewSessionResponse, HandlerError> = web::block(move || {
+        let conn = data.pool.get()
+            .map_err(|e| HandlerError::InternalError(InternalError::PoolError(e)))?;
+
+        // Generate new nonce
+        let mut nonce = vec![0u8; 16];
+        data.rng.fill(&mut nonce)
+            .map_err(|_e| HandlerError::InternalError(InternalError::RNGError))?;
+
+        // Expiry
+        let expiry = (Utc::now() + Duration::seconds(SESSION_DURATION)).naive_utc();
         diesel::insert_into(sessions::table)
             .values((
-                sessions::nonce.eq(n_nonce),
+                sessions::nonce.eq(&nonce),
                 sessions::expires.eq(expiry)
-                ))
-            .returning(sessions::id)
-            .get_result::<i32>(&conn).map_err(|e| e.to_string())
-    }).await;
+            )).execute(&conn).map_err(|e| HandlerError::InternalError(InternalError::DatabaseError(e)))?;
+        // Return new nonce
+        Ok::<NewSessionResponse, HandlerError>(NewSessionResponse { nonce, expiry })
+    }).await.map_err(|e| match e {
+        BlockingError::Error(he) => he,
+        BlockingError::Canceled => HandlerError::InternalError(InternalError::AsyncError)
+    });
     match res {
-        Ok(_id) => Ok(HttpResponse::Ok().json(
-            NewSessionResponse{nonce: r_nonce, expiry })),
-        Err(e) => {
-            eprintln!("{}", e);
-            Err(error::ErrorInternalServerError("A mishap"))
-        },
+        Ok(obj) => Ok(HttpResponse::Ok().json(obj)),
+        Err(e) => Err(e),
     }
 }
 
@@ -97,7 +101,7 @@ pub async fn check_session(req: SessionRequest, data: &ApplicationData) -> Resul
                 .map_err(|_e| HandlerError::InternalError(InternalError::RNGError))?;
 
             // And expiry
-            let expiry = (Utc::now() + Duration::days(1)).naive_utc();
+            let expiry = (Utc::now() + Duration::seconds(SESSION_DURATION)).naive_utc();
             diesel::update(sessions::table.find(session_id))
                 .set((
                     sessions::nonce.eq(&new_nonce),

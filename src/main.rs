@@ -35,7 +35,7 @@ struct TestResponse {
 async fn test(dat: web::Json<TestRequest>, app_data: web::Data<ApplicationData>) -> impl Responder {
     // Decompose
     let TestRequest{number, session} = dat.into_inner();
-    let (device_id, sess_resp) = session::check_session(session, &*app_data.into_inner()).await?;
+    let (_device_id, sess_resp) = session::check_session(session, &*app_data.into_inner()).await?;
     let new_number = number + 1;
     // Type hint needed (Rust can't figure it out properly)
     Ok::<HttpResponse, utils::HandlerError>(HttpResponse::Ok().json(TestResponse{ session: sess_resp, number: new_number }))
