@@ -4,15 +4,41 @@ extern crate diesel;
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use serde::{Deserialize, Serialize};
 use crate::database::Pool;
+use uuid::Uuid;
+use crate::utils::{HandlerError, InternalError};
+use actix_web::error::BlockingError;
 
 mod utils;
 mod base64enc;
 mod schema;
 mod database;
 mod session;
+mod user;
+mod device;
 
 async fn index() -> impl Responder {
     HttpResponse::Ok().body("Hello world!")
+}
+
+#[derive(Deserialize)]
+struct RegisterDeviceRequest {
+    #[serde(with = "base64enc")]
+    public_key: Vec<u8>
+}
+
+#[derive(Serialize)]
+struct RegisterDeviceResponse {
+    device_id: Uuid
+}
+
+async fn api_register_device(data: web::Json<RegisterDeviceRequest>, app_data: web::Data<ApplicationData>) -> Result<HttpResponse, HandlerError> {
+    let pool = app_data.into_inner().pool.clone();
+    let RegisterDeviceRequest{ public_key} = data.into_inner();
+    let res = web::block(move || device::create_device(&pool, &public_key)).await.map_err(|e| match e {
+        BlockingError::Error(he) => he,
+        BlockingError::Canceled => HandlerError::InternalError(InternalError::AsyncError)
+    })?;
+    Ok(HttpResponse::Ok().json(RegisterDeviceResponse{device_id: res}))
 }
 
 #[derive(Deserialize)]
