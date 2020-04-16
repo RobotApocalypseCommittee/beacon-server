@@ -18,15 +18,16 @@ pub struct UserCreation<'a> {
 pub fn create_user(pool: Pool, user: UserCreation, device_id: Uuid) -> Result<Uuid, HandlerError> {
     let conn = extract_connection(&pool)?;
     // Assumes the device does not already have a user.
-    let user_id = diesel::insert_into(users::table).values(&user)
-        .returning(users::id)
-        .get_result::<Uuid>(&conn).map_err(|e| HandlerError::InternalError(InternalError::DatabaseError(e)))?;
+    conn.transaction::<Uuid, _, _>(|| {
+        let user_id = diesel::insert_into(users::table).values(&user)
+            .returning(users::id)
+            .get_result::<Uuid>(&conn)?;
 
-    // Now update the device
-    diesel::update(devices::table.find(&device_id))
-        .set(devices::owner.eq(&user_id))
-        .execute(&conn).map_err(|e| HandlerError::InternalError(InternalError::DatabaseError(e)))?;
-
-    // TODO: Get user email verification
-    Ok(user_id)
+        // Now update the device
+        diesel::update(devices::table.find(&device_id))
+            .set(devices::owner.eq(&user_id))
+            .execute(&conn)?;
+        Ok(user_id)
+    }).map_err(|e| HandlerError::InternalError(InternalError::DatabaseError(e)))
+    // TODO: Send verification email
 }
