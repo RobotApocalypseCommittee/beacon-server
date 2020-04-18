@@ -1,4 +1,4 @@
-use actix_web::{Responder, web, HttpResponse, FromRequest, HttpRequest, HttpMessage};
+use actix_web::{web, FromRequest, HttpRequest, HttpMessage};
 use actix_web::error::BlockingError;
 use chrono::{Duration, NaiveDateTime, Utc};
 use diesel::prelude::*;
@@ -54,10 +54,8 @@ struct NewSessionResponse {
 // In seconds
 const SESSION_DURATION: i64 = 60*60;
 
-pub async fn new_session_request(pool: web::Data<Pool>, rng: web::Data<SystemRandom>) -> impl Responder {
-    let res: Result<NewSessionResponse, HandlerError> = web::block(move || {
-        let conn = pool.get()
-            .map_err(|e| HandlerError::InternalError(InternalError::PoolError(e)))?;
+pub fn new_session_request(pool: &Pool, rng: &SystemRandom) -> Result<Vec<u8>, HandlerError> {
+        let conn = extract_connection(pool)?;
 
         // Generate new nonce
         let mut nonce = vec![0u8; 16];
@@ -72,15 +70,7 @@ pub async fn new_session_request(pool: web::Data<Pool>, rng: web::Data<SystemRan
                 sessions::expires.eq(expiry)
             )).execute(&conn).map_err(|e| HandlerError::InternalError(InternalError::DatabaseError(e)))?;
         // Return new nonce
-        Ok::<NewSessionResponse, HandlerError>(NewSessionResponse { nonce, expiry })
-    }).await.map_err(|e| match e {
-        BlockingError::Error(he) => he,
-        BlockingError::Canceled => HandlerError::InternalError(InternalError::AsyncError)
-    });
-    match res {
-        Ok(obj) => Ok(HttpResponse::Ok().json(obj)),
-        Err(e) => Err(e),
-    }
+        Ok(nonce)
 }
 #[derive(Clone)]
 pub struct SessionInfo {
@@ -116,7 +106,7 @@ fn check_session(req: SessionRequest, pool: &Pool, rng: &SystemRandom) -> Result
     // Still valid
     return if session_expires > Utc::now().naive_utc() {
         // Query devices
-        let (pub_key, owner) = devices::table.find(req.device_id).select((devices::public_key, devices::owner)).first::<(Vec<u8>, Option<Uuid>)>(&conn)
+        let (pub_key, owner) = devices::table.find(req.device_id).select((devices::public_key, devices::user_id)).first::<(Vec<u8>, Option<Uuid>)>(&conn)
             .map_err(|e| match e {
                 diesel::result::Error::NotFound => HandlerError::DeviceUnknown,
                 _ => HandlerError::InternalError(InternalError::DatabaseError(e))

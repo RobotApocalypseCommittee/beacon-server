@@ -5,9 +5,10 @@ use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use serde::{Deserialize, Serialize};
 use crate::database::Pool;
 use uuid::Uuid;
-use crate::utils::{HandlerError, InternalError};
+use crate::utils::{HandlerError, InternalError, block};
 use actix_web::error::BlockingError;
 use crate::session::{SessionInfo};
+use ring::rand::SystemRandom;
 
 mod utils;
 mod base64enc;
@@ -19,6 +20,22 @@ mod device;
 
 async fn index() -> impl Responder {
     HttpResponse::Ok().body("Hello world!")
+}
+
+async fn api_create_session(pool: web::Data<Pool>, rng: web::Data<SystemRandom>) -> Result<HttpResponse, HandlerError> {
+    let nonce = block(move || session::new_session_request(&pool, &rng)).await?;
+    Ok(HttpResponse::Ok().set_header("X-NEWNONCE", base64::encode(nonce)).finish())
+}
+
+
+#[derive(Serialize)]
+struct CreateUserResponse {
+    user_id: Uuid
+}
+async fn api_create_user(data: web::Json<user::UserCreation>, pool: web::Data<Pool>, session: SessionInfo) -> Result<HttpResponse, HandlerError> {
+    let data = data.into_inner();
+    let res = block(move || user::create_user(&pool, data, session.device_id)).await?;
+    Ok(HttpResponse::Ok().json(CreateUserResponse{ user_id: res}))
 }
 
 #[derive(Deserialize)]
@@ -74,11 +91,12 @@ async fn main() -> std::io::Result<()> {
             .data(pool.clone())
             .data(rng.clone())
             .route("/", web::get().to(index))
-            .route("/newsession", web::post().to(session::new_session_request))
+            .route("/session/new", web::post().to(api_create_session))
+            .route("/devices/new", web::post().to(api_register_device))
             .service(
-                web::resource("/increment")
-                    .route(web::post().to(test))
+                web::scope("/users")
                     .wrap(session::CheckSession)
+                    .route("/new", web::post().to(api_create_user))
             )
     })
         .bind("127.0.0.1:8088")?
