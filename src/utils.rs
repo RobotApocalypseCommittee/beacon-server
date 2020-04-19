@@ -39,6 +39,7 @@ impl ResponseError for HandlerError {
     }
 
     fn error_response(&self) -> HttpResponse {
+        println!("Error serving request: {} {:?}", self.status_code(), self);
         HttpResponse::build(self.status_code())
             .content_type("plain/text")
             .body(self.to_string())
@@ -51,7 +52,8 @@ pub enum InternalError {
     PoolError(r2d2::Error),
     AsyncError,
     RNGError,
-    ServerDataError
+    ServerDataError,
+    JustAnError
 }
 
 pub fn malformed_data(s: &'static str) -> HandlerError {
