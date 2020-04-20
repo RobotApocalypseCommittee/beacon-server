@@ -2,7 +2,7 @@ use crate::database::{Pool, extract_connection};
 use uuid::Uuid;
 use crate::schema::{users, devices};
 use diesel::prelude::*;
-use crate::utils::{HandlerError, InternalError};
+use crate::utils::{HandlerError, InternalError, Entity};
 use crate::base64enc;
 use serde::Deserialize;
 
@@ -35,7 +35,7 @@ pub fn create_user(pool: &Pool, user: UserCreation, device_id: Uuid) -> Result<U
             .set(devices::user_id.eq(&user_id))
             .execute(&conn)?;
         Ok(user_id)
-    }).map_err(|e| HandlerError::InternalError(InternalError::DatabaseError(e)))
+    }).map_err(|e| InternalError::DatabaseError(e).into())
     // TODO: Send verification email
 }
 
@@ -53,9 +53,9 @@ pub fn update_prekey(pool: &Pool, update: PreKeyUpdate, user_id: Uuid) -> Result
         .set(( users::signed_prekey.eq(&update.signed_prekey),
         users::prekey_signature.eq(&update.prekey_signature)))
         .execute(&conn)
-        .map_err(|e| HandlerError::InternalError(InternalError::DatabaseError(e)))?
+        .map_err(|e| InternalError::DatabaseError(e))?
     {
-        0 => Err(HandlerError::UserUnknown(user_id)),
+        0 => Err(HandlerError::UnknownEntity { entity: Entity::User {uuid: user_id}}),
         _ => Ok(())
     }
 }

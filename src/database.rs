@@ -15,5 +15,5 @@ pub fn obtain_pool() -> Pool {
 }
 
 pub fn extract_connection(pool: &Pool) -> Result<Conn, HandlerError> {
-    return pool.get().map_err(|e| HandlerError::InternalError(InternalError::PoolError(e)));
+    pool.get().map_err(|e| InternalError::PoolError(e).into())
 }

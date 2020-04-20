@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{base64enc};
-use crate::utils::{HandlerError, InternalError, malformed_data};
+use crate::utils::{HandlerError, InternalError, Entity};
 
 use super::schema::{devices, sessions};
 
@@ -60,7 +60,7 @@ pub fn new_session_request(pool: &Pool, rng: &SystemRandom) -> Result<Vec<u8>, H
         // Generate new nonce
         let mut nonce = vec![0u8; 16];
         rng.fill(&mut nonce)
-            .map_err(|_e| HandlerError::InternalError(InternalError::RNGError))?;
+            .map_err(|_e| HandlerError::InternalError{ error: InternalError::RNGError})?;
 
         // Expiry
         let expiry = (Utc::now() + Duration::seconds(SESSION_DURATION)).naive_utc();
@@ -68,7 +68,7 @@ pub fn new_session_request(pool: &Pool, rng: &SystemRandom) -> Result<Vec<u8>, H
             .values((
                 sessions::nonce.eq(&nonce),
                 sessions::expires.eq(expiry)
-            )).execute(&conn).map_err(|e| HandlerError::InternalError(InternalError::DatabaseError(e)))?;
+            )).execute(&conn).map_err(|e| -> HandlerError { InternalError::DatabaseError(e).into()})?;
         // Return new nonce
         Ok(nonce)
 }
@@ -85,7 +85,7 @@ impl FromRequest for SessionInfo {
 
     fn from_request(req: &HttpRequest, _payload: &mut Payload<PayloadStream>) -> Self::Future {
         ready(match req.extensions().get::<SessionInfo>() {
-            None => Err(HandlerError::InternalError(InternalError::ServerDataError)),
+            None => Err(HandlerError::InternalError{ error: InternalError::ServerDataError}),
             Some(s) => Ok(s.clone()),
         })
     }
@@ -100,17 +100,17 @@ fn check_session(req: SessionRequest, pool: &Pool, rng: &SystemRandom) -> Result
         .first::<(i32, NaiveDateTime)>(&conn)
         .map_err(|e| match e {
             diesel::result::Error::NotFound => HandlerError::SessionInvalid,
-            _ => HandlerError::InternalError(InternalError::DatabaseError(e))
+            _ => HandlerError::InternalError {error: InternalError::DatabaseError(e)}
         })?;
 
     // Still valid
     return if session_expires > Utc::now().naive_utc() {
         // Query devices
         let (pub_key, owner) = devices::table.find(req.device_id).select((devices::public_key, devices::user_id)).first::<(Vec<u8>, Option<Uuid>)>(&conn)
-            .map_err(|e| match e {
-                diesel::result::Error::NotFound => HandlerError::DeviceUnknown,
-                _ => HandlerError::InternalError(InternalError::DatabaseError(e))
-            })?;
+            .map_err(|e| -> HandlerError { match e {
+                diesel::result::Error::NotFound => HandlerError::UnknownEntity {entity: Entity::Device {uuid: req.device_id}},
+                _ => InternalError::DatabaseError(e).into()
+            }})?;
         let device_public_key = signature::UnparsedPublicKey::new(&signature::ED25519, pub_key);
         device_public_key.verify(&req.nonce[..], &req.signed_nonce[..])
             .map_err(|_e| HandlerError::AuthenticationError)?;
@@ -118,7 +118,7 @@ fn check_session(req: SessionRequest, pool: &Pool, rng: &SystemRandom) -> Result
         // Now generate new nonce
         let mut new_nonce =  vec![0u8; 16];
         rng.fill(&mut new_nonce)
-            .map_err(|_e| HandlerError::InternalError(InternalError::RNGError))?;
+            .map_err(|_e| InternalError::RNGError)?;
 
         // And expiry
         let expiry = (Utc::now() + Duration::seconds(SESSION_DURATION)).naive_utc();
@@ -126,32 +126,29 @@ fn check_session(req: SessionRequest, pool: &Pool, rng: &SystemRandom) -> Result
             .set((
                 sessions::nonce.eq(&new_nonce),
                 sessions::expires.eq(expiry)
-            )).execute(&conn).map_err(|e| HandlerError::InternalError(InternalError::DatabaseError(e)))?;
+            )).execute(&conn).map_err(|e| InternalError::DatabaseError(e))?;
 
         // Return new nonce, and device id
         Ok((req.device_id, owner, new_nonce))
     } else {
         diesel::delete(sessions::table.find(session_id))
-            .execute(&conn).map_err(|e| HandlerError::InternalError(InternalError::DatabaseError(e)))?;
+            .execute(&conn).map_err(|e| InternalError::DatabaseError(e))?;
         Err(HandlerError::SessionInvalid)
     }
 }
 
 fn extract_header_data (req: &ServiceRequest) -> Result<SessionRequest, HandlerError> {
-    let device_id = req.headers().get("X-DEVICEID")
-        .ok_or(malformed_data("header X-DEVICEID"))
-        .and_then(|header| header.to_str().map_err(|_e| malformed_data("header X-DEVICEID")))
-        .and_then(|header| uuid::Uuid::from_str(header).map_err(|_e| malformed_data("header X-DEVICEID")))?;
+    let head_err = |n: &str| HandlerError::MalformedHeader { name: n.to_string()};
+    let get_header = |n: &str| { req.headers().get(n)
+        .ok_or(head_err(n))
+        .and_then(|header| header.to_str().map_err(|_e| head_err(n)))};
 
-    let nonce = req.headers().get("X-NONCE")
-        .ok_or(malformed_data("header X-NONCE"))
-        .and_then(|header| header.to_str().map_err(|_e| malformed_data("header X-NONCE")))
-        .and_then(|header|base64::decode(header).map_err(|_e| malformed_data("header X-NONCE")))?;
-
-    let signed_nonce = req.headers().get("X-SIGNEDNONCE")
-        .ok_or(malformed_data("header X-SIGNEDNONCE"))
-        .and_then(|header| header.to_str().map_err(|_e| malformed_data("header X-SIGNEDNONCE")))
-        .and_then(|header|base64::decode(header).map_err(|_e| malformed_data("header X-SIGNEDNONCE")))?;
+    let device_id = uuid::Uuid::from_str(get_header("X-DEVICEID")?)
+        .map_err(|_e| head_err("X-DEVICEID"))?;
+    let nonce = base64::decode(get_header("X-NONCE")?)
+        .map_err(|_e| head_err("X-NONCE"))?;
+    let signed_nonce = base64::decode(get_header("X-SIGNEDNONCE")?)
+        .map_err(|_e| head_err("X-SIGNEDNONCE"))?;
 
     Ok(SessionRequest {
         device_id,
@@ -202,18 +199,18 @@ impl<S, B> Service for CheckSessionMiddleware<S>
 
     fn call(&mut self, req: ServiceRequest) -> Self::Future {
         let session_data = extract_header_data(&req);
-        let pool = req.app_data::<Pool>().ok_or(HandlerError::InternalError(InternalError::ServerDataError));
-        let rng = req.app_data::<SystemRandom>().ok_or(HandlerError::InternalError(InternalError::ServerDataError));
+        let pool = req.app_data::<Pool>().ok_or(InternalError::ServerDataError);
+        let rng = req.app_data::<SystemRandom>().ok_or(InternalError::ServerDataError);
         let mut srv = self.service.clone();
         Box::pin(async move {
             let (device_id, user_id, nonce) = web::block(move || check_session(session_data?, &pool?.into_inner(), &rng?.into_inner()))
                 .await.map_err(|e| match e {
                 BlockingError::Error(he) => he,
-                BlockingError::Canceled => HandlerError::InternalError(InternalError::AsyncError)
+                BlockingError::Canceled => InternalError::AsyncError.into()
             })?;
             req.extensions_mut().insert(SessionInfo{ device_id, user_id });
             let mut res: Self::Response = srv.call(req).await?;
-            res.headers_mut().insert(HeaderName::try_from("x-newnonce").map_err(|e| HandlerError::InternalError(InternalError::JustAnError))?,
+            res.headers_mut().insert(HeaderName::try_from("x-newnonce").map_err(|e| HandlerError::from(InternalError::JustAnError))?,
                                      HeaderValue::try_from(base64::encode(&nonce)).expect("NONCE BASE64 INVALID"));
 
             Ok(res)

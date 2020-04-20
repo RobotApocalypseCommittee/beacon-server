@@ -53,7 +53,7 @@ async fn api_register_device(data: web::Json<RegisterDeviceRequest>, pool: web::
     let RegisterDeviceRequest{ public_key} = data.into_inner();
     let res = web::block(move || device::create_device(&pool, &public_key)).await.map_err(|e| match e {
         BlockingError::Error(he) => he,
-        BlockingError::Canceled => HandlerError::InternalError(InternalError::AsyncError)
+        BlockingError::Canceled => InternalError::AsyncError.into()
     })?;
     Ok(HttpResponse::Ok().json(RegisterDeviceResponse{device_id: res}))
 }
@@ -99,7 +99,7 @@ async fn main() -> std::io::Result<()> {
                     .route("/new", web::post().to(api_create_user))
             )
     })
-        .bind("127.0.0.1:8088")?
+        .bind("0.0.0.0:8088")?
         .run()
         .await
 }

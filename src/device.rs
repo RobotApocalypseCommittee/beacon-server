@@ -9,5 +9,5 @@ pub fn create_device(pool: &Pool, public_key: &Vec<u8>) -> Result<Uuid, HandlerE
     diesel::insert_into(devices::table)
         .values(devices::public_key.eq(public_key))
         .returning(devices::id)
-        .get_result::<Uuid>(&conn).map_err(|e| HandlerError::InternalError(InternalError::DatabaseError(e)))
+        .get_result::<Uuid>(&conn).map_err(|e| InternalError::DatabaseError(e).into())
 }
