@@ -1,14 +1,15 @@
 #[macro_use]
 extern crate diesel;
 
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{web, App, HttpResponse, HttpServer, Responder, HttpRequest};
 use serde::{Deserialize, Serialize};
 use crate::database::Pool;
 use uuid::Uuid;
 use crate::utils::{HandlerError, InternalError, block};
 use actix_web::error::BlockingError;
-use crate::session::{SessionInfo};
+use crate::session::SessionInfo;
 use ring::rand::SystemRandom;
+use actix_web::web::JsonConfig;
 
 mod utils;
 mod base64enc;
@@ -32,10 +33,11 @@ async fn api_create_session(pool: web::Data<Pool>, rng: web::Data<SystemRandom>)
 struct CreateUserResponse {
     user_id: Uuid
 }
+
 async fn api_create_user(data: web::Json<user::UserCreation>, pool: web::Data<Pool>, session: SessionInfo) -> Result<HttpResponse, HandlerError> {
     let data = data.into_inner();
     let res = block(move || user::create_user(&pool, data, session.device_id)).await?;
-    Ok(HttpResponse::Ok().json(CreateUserResponse{ user_id: res}))
+    Ok(HttpResponse::Ok().json(CreateUserResponse { user_id: res }))
 }
 
 #[derive(Deserialize)]
@@ -50,32 +52,24 @@ struct RegisterDeviceResponse {
 }
 
 async fn api_register_device(data: web::Json<RegisterDeviceRequest>, pool: web::Data<Pool>) -> Result<HttpResponse, HandlerError> {
-    let RegisterDeviceRequest{ public_key} = data.into_inner();
+    let RegisterDeviceRequest { public_key } = data.into_inner();
     let res = web::block(move || device::create_device(&pool, &public_key)).await.map_err(|e| match e {
         BlockingError::Error(he) => he,
         BlockingError::Canceled => InternalError::AsyncError.into()
     })?;
-    Ok(HttpResponse::Ok().json(RegisterDeviceResponse{device_id: res}))
+    Ok(HttpResponse::Ok().json(RegisterDeviceResponse { device_id: res }))
 }
 
-#[derive(Deserialize)]
-struct TestRequest {
-    number: i32
+async fn api_new_signed_key(data: web::Json<user::PreKeyUpdate>, pool: web::Data<Pool>, session: SessionInfo) -> Result<HttpResponse, HandlerError> {
+    block(move || user::update_prekey(&pool, data.into_inner(), session.user_id.ok_or(HandlerError::AuthenticationError)?)).await?;
+    Ok(HttpResponse::Ok().finish())
 }
 
-#[derive(Serialize)]
-struct TestResponse {
-    number: i32
-}
-
-async fn test(data: web::Json<TestRequest>, session: SessionInfo) -> impl Responder {
-    // Decompose
-    let TestRequest{number} = data.into_inner();
-    let SessionInfo{ device_id, user_id } = session;
-    println!("{}, {:?}", device_id, user_id);
-    let new_number = number + 1;
-    // Type hint needed (Rust can't figure it out properly)
-    Ok::<HttpResponse, utils::HandlerError>(HttpResponse::Ok().json(TestResponse{ number: new_number }))
+async fn api_new_otks(data: web::Json<user::OTKAdd>, pool: web::Data<Pool>, session: SessionInfo) -> Result<HttpResponse, HandlerError> {
+    let user_id = session.user_id.ok_or(HandlerError::AuthenticationError)?;
+    let data = data.into_inner().keys;
+    let no_committed = block(move || user::add_otks(&pool, &data, user_id)).await?;
+    Ok(HttpResponse::Ok().finish())
 }
 
 
@@ -90,6 +84,10 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .data(pool.clone())
             .data(rng.clone())
+            .app_data(JsonConfig::default().error_handler(|e, _| {
+                println!("Hello");
+                HandlerError::MalformedBody { error_message: e.to_string() }.into()
+            }))
             .route("/", web::get().to(index))
             .route("/session/new", web::post().to(api_create_session))
             .route("/devices/new", web::post().to(api_register_device))
@@ -97,6 +95,12 @@ async fn main() -> std::io::Result<()> {
                 web::scope("/users")
                     .wrap(session::CheckSession)
                     .route("/new", web::post().to(api_create_user))
+            )
+            .service(
+                web::scope("/keys")
+                    .wrap(session::CheckSession)
+                    .route("/signed", web::post().to(api_new_signed_key))
+                    .route("/onetime", web::post().to(api_new_otks))
             )
     })
         .bind("0.0.0.0:8088")?

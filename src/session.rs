@@ -210,7 +210,7 @@ impl<S, B> Service for CheckSessionMiddleware<S>
             })?;
             req.extensions_mut().insert(SessionInfo{ device_id, user_id });
             let mut res: Self::Response = srv.call(req).await?;
-            res.headers_mut().insert(HeaderName::try_from("x-newnonce").map_err(|e| HandlerError::from(InternalError::JustAnError))?,
+            res.headers_mut().insert(HeaderName::try_from("x-newnonce").map_err(|_e| HandlerError::from(InternalError::JustAnError))?,
                                      HeaderValue::try_from(base64::encode(&nonce)).expect("NONCE BASE64 INVALID"));
 
             Ok(res)

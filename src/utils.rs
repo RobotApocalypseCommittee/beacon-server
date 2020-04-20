@@ -5,6 +5,7 @@ use uuid::Uuid;
 use actix_web::error::BlockingError;
 use serde::Serialize;
 use serde::export::Formatter;
+use ring::error::Unspecified;
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
@@ -12,7 +13,9 @@ pub enum HandlerError {
     SessionExpired,
     SessionInvalid,
     UnknownEntity { #[serde(flatten)] entity: Entity },
+    RecordMustBeUnique { name: String},
     AuthenticationError,
+    SignatureMismatch,
     MalformedHeader { name: String },
     MalformedBody { error_message: String },
     InternalError { #[serde(skip_serializing)] error: InternalError },
@@ -36,11 +39,9 @@ impl ResponseError for HandlerError {
         match self {
             HandlerError::SessionInvalid => StatusCode::UNAUTHORIZED,
             HandlerError::SessionExpired => StatusCode::UNAUTHORIZED,
-            HandlerError::UnknownEntity {..} => StatusCode::BAD_REQUEST,
             HandlerError::AuthenticationError => StatusCode::UNAUTHORIZED,
             HandlerError::InternalError{ .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            HandlerError::MalformedHeader { .. } => StatusCode::BAD_REQUEST,
-            HandlerError::MalformedBody { .. } => StatusCode::BAD_REQUEST,
+            _ => StatusCode::BAD_REQUEST,
         }
     }
 
@@ -50,7 +51,6 @@ impl ResponseError for HandlerError {
             .json(self)
     }
 }
-
 #[derive(Debug)]
 pub enum InternalError {
     DatabaseError(diesel::result::Error),
