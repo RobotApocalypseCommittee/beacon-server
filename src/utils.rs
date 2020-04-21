@@ -10,6 +10,7 @@ use ring::error::Unspecified;
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub enum HandlerError {
+    InsufficientPrekeys,
     SessionExpired,
     SessionInvalid,
     UnknownEntity { #[serde(flatten)] entity: Entity },

@@ -72,6 +72,11 @@ async fn api_new_otks(data: web::Json<user::OTKAdd>, pool: web::Data<Pool>, sess
     Ok(HttpResponse::Ok().finish())
 }
 
+async fn api_get_chat_package(user_id: web::Path<Uuid>, pool: web::Data<Pool>) -> Result<HttpResponse, HandlerError> {
+    let response = block(move || user::retrieve_package(&pool, user_id.into_inner())).await?;
+    Ok(HttpResponse::Ok().json(response))
+}
+
 
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
@@ -95,6 +100,7 @@ async fn main() -> std::io::Result<()> {
                 web::scope("/users")
                     .wrap(session::CheckSession)
                     .route("/new", web::post().to(api_create_user))
+                    .route("/{user_id}/package", web::post().to(api_get_chat_package))
             )
             .service(
                 web::scope("/keys")

@@ -4,8 +4,10 @@ use crate::schema::{users, devices, onetimekeys};
 use diesel::prelude::*;
 use crate::utils::{HandlerError, InternalError, Entity};
 use crate::base64enc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use diesel::result::Error;
+use diesel::pg::expression::array_comparison::any;
+use actix_web::http::header::q;
 
 fn check_signed_prekey(identity_key: &Vec<u8>, signed_key: &Vec<u8>, signature: &Vec<u8>) -> Result<(), HandlerError>{
     let key = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, identity_key);
@@ -97,5 +99,43 @@ pub fn add_otks(pool: &Pool, keys: &Vec<String>, user_id: Uuid) -> Result<usize,
     diesel::insert_into(onetimekeys::table)
         .values(&values)
         .execute(&conn).map_err(|e| InternalError::DatabaseError(e).into())
+}
 
+#[derive(Serialize)]
+pub struct ChatPackage {
+    #[serde(with = "base64enc")]
+    identity_key: Vec<u8>,
+    #[serde(with = "base64enc")]
+    signed_prekey: Vec<u8>,
+    #[serde(with = "base64enc")]
+    prekey_signature: Vec<u8>,
+    #[serde(with = "base64enc")]
+    onetime_key: Vec<u8>
+}
+
+pub fn retrieve_package(pool: &Pool, user_id: Uuid) -> Result<ChatPackage, HandlerError> {
+    let conn = extract_connection(pool)?;
+    let (identity_key, signed_prekey, prekey_signature) = users::table.find(user_id).select((users::identity_key, users::signed_prekey, users::prekey_signature))
+        .first::<(Vec<u8>, Vec<u8>, Vec<u8>)>(&conn)
+        .map_err(|e| match e {
+            diesel::result::Error::NotFound => HandlerError::UnknownEntity { entity: Entity::User {uuid: user_id}},
+            _ => InternalError::DatabaseError(e).into()
+        })?;
+    let mut query = diesel::delete(onetimekeys::table.filter(
+        onetimekeys::id.eq(any(onetimekeys::table.select(onetimekeys::id)
+            .filter(onetimekeys::user_id.eq(user_id))
+            .limit(1).into_boxed()))))
+        .returning((onetimekeys::prekey))
+        .load::<Vec<u8>>(&conn).map_err(|e| HandlerError::InternalError {error: InternalError::DatabaseError(e)})?;
+
+    if query.len() == 0 {
+        return Err(HandlerError::InsufficientPrekeys)
+    }
+
+    Ok(ChatPackage {
+        identity_key,
+        signed_prekey,
+        prekey_signature,
+        onetime_key: query.remove(0)
+    })
 }
