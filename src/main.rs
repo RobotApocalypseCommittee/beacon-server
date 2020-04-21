@@ -11,6 +11,7 @@ use crate::session::SessionInfo;
 use ring::rand::SystemRandom;
 use actix_web::web::JsonConfig;
 use crate::message::MailboxReturn;
+use std::env;
 
 mod utils;
 mod base64enc;
@@ -100,6 +101,10 @@ async fn api_check_messages(pool: web::Data<Pool>, session: SessionInfo) -> Resu
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
+    let port = env::var("PORT")
+        .unwrap_or_else(|_| "8088".to_string())
+        .parse()
+        .expect("PORT must be a number");
     let pool = database::obtain_pool();
     let rng = ring::rand::SystemRandom::new();
 
@@ -135,7 +140,7 @@ async fn main() -> std::io::Result<()> {
             )
 
     })
-        .bind("0.0.0.0:8088")?
+        .bind(("0.0.0.0", port))?
         .run()
         .await
 }

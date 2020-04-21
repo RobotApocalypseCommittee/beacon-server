@@ -60,6 +60,7 @@ pub fn check_mailbox(pool: &Pool, device_id: Uuid) -> Result<Vec<MailboxReturn>,
 
         messages::table.filter(messages::id.eq_any(&message_ids))
             .select((messages::sender, messages::message_type, messages::reception_time, messages::payload))
+            .order(messages::reception_time.asc())
             .load::<MailboxReturn>(&conn)
     }).map_err(|e| InternalError::DatabaseError(e).into())
 }
