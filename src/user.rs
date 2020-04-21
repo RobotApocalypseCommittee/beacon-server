@@ -93,7 +93,7 @@ pub fn add_otks(pool: &Pool, keys: &Vec<String>, user_id: Uuid) -> Result<usize,
 
     let values = keys.iter().map(|s| -> Result<_, HandlerError> {Ok((
         onetimekeys::prekey.eq(base64::decode(s)
-        .map_err(|e|HandlerError::MalformedBody { error_message: "base64 error".to_string()})?),
+        .map_err(|_e|HandlerError::MalformedBody { error_message: "base64 error".to_string()})?),
     onetimekeys::user_id.eq(&user_id)))}).collect::<Result<Vec<_>, HandlerError>>()?;
 
     diesel::insert_into(onetimekeys::table)

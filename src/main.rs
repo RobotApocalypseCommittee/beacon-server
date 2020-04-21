@@ -10,6 +10,7 @@ use actix_web::error::BlockingError;
 use crate::session::SessionInfo;
 use ring::rand::SystemRandom;
 use actix_web::web::JsonConfig;
+use crate::message::MailboxReturn;
 
 mod utils;
 mod base64enc;
@@ -18,6 +19,7 @@ mod database;
 mod session;
 mod user;
 mod device;
+mod message;
 
 async fn index() -> impl Responder {
     HttpResponse::Ok().body("Hello world!")
@@ -77,6 +79,23 @@ async fn api_get_chat_package(user_id: web::Path<Uuid>, pool: web::Data<Pool>) -
     Ok(HttpResponse::Ok().json(response))
 }
 
+async fn api_new_message(data: web::Json<message::NewMessage>, pool: web::Data<Pool>, session: SessionInfo) -> Result<HttpResponse, HandlerError> {
+    let mut data = data.into_inner();
+    data.sender = session.user_id.ok_or(HandlerError::AuthenticationError)?;
+    let message_id = block(move || message::add_message(&pool, data)).await?;
+    Ok(HttpResponse::Ok().finish())
+}
+
+#[derive(Serialize)]
+struct CheckMessagesResponse {
+    messages: Vec<MailboxReturn>
+}
+
+async fn api_check_messages(pool: web::Data<Pool>, session: SessionInfo) -> Result<HttpResponse, HandlerError> {
+    let messages = block(move || message::check_mailbox(&pool, session.device_id)).await?;
+    Ok(HttpResponse::Ok().json(CheckMessagesResponse{ messages }))
+}
+
 
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
@@ -108,6 +127,13 @@ async fn main() -> std::io::Result<()> {
                     .route("/signed", web::post().to(api_new_signed_key))
                     .route("/onetime", web::post().to(api_new_otks))
             )
+            .service(
+                web::scope("/messages")
+                    .wrap(session::CheckSession)
+                    .route("/send", web::post().to(api_new_message))
+                    .route("/mailbox", web::post().to(api_check_messages))
+            )
+
     })
         .bind("0.0.0.0:8088")?
         .run()
